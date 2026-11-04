@@ -6,6 +6,7 @@ import { AIMessage, BaseMessage, createAgent, tool } from "langchain";
 import * as z from "zod";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import {
+  MemorySaver,
   MessagesAnnotation,
   MessagesValue,
   StateGraph,
@@ -13,11 +14,14 @@ import {
   type ConditionalEdgeRouter,
   type GraphNode,
 } from "@langchain/langgraph";
+import { MongoClient } from "mongodb";
+import { MongoDBSaver } from "@langchain/langgraph-checkpoint-mongodb";
 config();
 
 const app = express();
 app.use(express.json());
 const PORT = process.env.PORT;
+const client = new MongoClient("mongodb://localhost:27017/");
 const searchTool = new TavilySearch({
   maxResults: 5,
   topic: "general",
@@ -42,7 +46,10 @@ const model = new ChatGoogle({
   apiKey: process.env.GOOGLE_API_KEY,
   maxRetries: 0,
 }).bindTools(tools);
-
+const checkpointer = new MongoDBSaver({
+  client: client as any,
+  dbName: "langraph",
+});
 const toolNode = new ToolNode(tools);
 const agentNode = async (state: typeof MessagesAnnotation.State) => {
   const result = await model.invoke(state.messages);
@@ -69,7 +76,7 @@ const graph = new StateGraph(MessagesAnnotation)
   .addEdge("__start__", "agent")
   .addConditionalEdges("agent", shouldContinue)
   .addEdge("tool_node", "agent")
-  .compile();
+  .compile({ checkpointer });
 app.post("/api/hello", async (req: Request, res: Response) => {
   try {
     const { prompt } = req.body;
@@ -78,14 +85,17 @@ app.post("/api/hello", async (req: Request, res: Response) => {
         .json(400)
         .json({ success: false, message: "Not a valid prompt" });
     }
-    const result = await graph.invoke({
-      messages: [
-        {
-          role: "human",
-          content: prompt,
-        },
-      ],
-    });
+    const result = await graph.invoke(
+      {
+        messages: [
+          {
+            role: "human",
+            content: prompt,
+          },
+        ],
+      },
+      { configurable: { thread_id: "user-123" } },
+    );
     return res.status(200).json({
       success: true,
       message: result.messages[result.messages.length - 1]?.content,
